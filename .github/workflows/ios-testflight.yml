@@ -1,0 +1,115 @@
+name: iOS TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: "Note interne"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "tf-v*"
+
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment: production
+
+    steps:
+      - name: Checkout app
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.MOBILE_REPO }}
+          token: ${{ secrets.CI_PAT_TOKEN }}
+          path: app
+
+      - name: Select Xcode 26.x
+        run: |
+          XCODE_PATH=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE_PATH" ]; then
+            echo "::error::Xcode 26.x not found on runner"
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+          xcodebuild -version
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Setup EAS CLI
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install dependencies
+        run: cd app && npm ci
+
+      - name: Compute build number
+        env:
+          OFFSET: "100"
+        run: |
+          BN=$(( ${{ github.run_number }} + OFFSET ))
+          echo "BUILD_NUMBER=$BN" >> "$GITHUB_ENV"
+
+      - name: Inject build number
+        run: |
+          node -e '
+            const fs = require("fs");
+            const p = "app/app.json";
+            const j = JSON.parse(fs.readFileSync(p, "utf8"));
+            const bn = process.env.BUILD_NUMBER;
+            j.expo.ios = j.expo.ios || {};
+            j.expo.android = j.expo.android || {};
+            j.expo.ios.buildNumber = String(bn);
+            j.expo.android.versionCode = Number(bn);
+            fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
+          '
+
+      - name: Build .ipa
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ALLOW_FAILURE: "true"
+          EXPO_PUBLIC_SUPABASE_URL: ${{ secrets.EXPO_PUBLIC_SUPABASE_URL }}
+          EXPO_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
+          EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID: ${{ secrets.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID }}
+          EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID: ${{ secrets.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID }}
+          EXPO_PUBLIC_SENTRY_DSN: ${{ secrets.EXPO_PUBLIC_SENTRY_DSN }}
+          EXPO_PUBLIC_POSTHOG_KEY: ${{ secrets.EXPO_PUBLIC_POSTHOG_KEY }}
+          EXPO_PUBLIC_POSTHOG_HOST: ${{ secrets.EXPO_PUBLIC_POSTHOG_HOST }}
+        run: |
+          cd app
+          eas build \
+            --platform ios \
+            --profile production \
+            --local \
+            --non-interactive \
+            --output ../app-store.ipa
+
+      - name: Upload to TestFlight
+        uses: apple-actions/upload-testflight-build@v5
+        with:
+          app-path: ./app-store.ipa
+          issuer-id: ${{ secrets.APPSTORE_ISSUER_ID }}
+          api-key-id: ${{ secrets.APPSTORE_API_KEY_ID }}
+          api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-appstore-ipa
+          path: ./app-store.ipa
+          retention-days: 7
+          if-no-files-found: warn

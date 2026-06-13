@@ -1,0 +1,11 @@
+# Repo CI public : aucun secret, aucun artefact ne doit jamais y entrer.
+.env
+.env.*
+*.ipa
+*.aab
+*.p8
+*.p12
+*.mobileprovision
+*.keystore
+node_modules/
+.DS_Store
