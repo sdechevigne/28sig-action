@@ -109,17 +109,33 @@ jobs:
             --non-interactive \
             --output ../app-store.ipa
 
-      - name: Upload to TestFlight
-        uses: apple-actions/upload-testflight-build@v5
-        with:
-          app-path: ./app-store.ipa
-          issuer-id: ${{ secrets.APPSTORE_ISSUER_ID }}
-          api-key-id: ${{ secrets.APPSTORE_API_KEY_ID }}
-          api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+      # La clé App Store Connect API (.p8, secret) est écrite dans le fichier attendu
+      # par eas.json (submit.production.ios.ascApiKeyPath). On la passe via une
+      # variable d'env puis on l'écrit telle quelle avec node (préserve les retours
+      # ligne PEM sans réencodage). Effacée en fin de job.
+      - name: Write ASC API key
+        env:
+          ASC_API_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+        run: |
+          node -e 'const k=process.env.ASC_API_KEY||""; require("crypto").createPrivateKey({key:k,format:"pem"}); require("fs").writeFileSync("app/asc-api-key.p8", k);' \
+            || { echo "::error::APPSTORE_API_PRIVATE_KEY manquante ou clé PEM invalide"; exit 1; }
 
-      # Aucun artifact n'est conservé : le .ipa signé ne va QUE vers TestFlight.
-      # On efface le binaire en fin de job (le runner est de toute façon détruit,
-      # mais hygiène : rien de récupérable n'est laissé derrière).
-      - name: Wipe build outputs
+      # eas submit lit ascAppId / ascApiKeyPath / ascApiKeyIssuerId / ascApiKeyId
+      # depuis eas.json. Plus robuste que l'action apple-actions (qui butait sur le
+      # décodage de la clé), et cohérent avec le workflow Android.
+      - name: Submit to TestFlight
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          cd app
+          eas submit \
+            --platform ios \
+            --profile production \
+            --path ../app-store.ipa \
+            --non-interactive
+
+      # Aucun artifact n'est conservé : le .ipa ne va QUE vers TestFlight. On efface
+      # le binaire ET la clé ASC en fin de job (hygiène, le runner est jeté ensuite).
+      - name: Wipe build outputs and secrets
         if: always()
-        run: rm -f ./app-store.ipa
+        run: rm -f ./app-store.ipa app/asc-api-key.p8
