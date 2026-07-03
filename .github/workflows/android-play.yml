@@ -114,9 +114,19 @@ jobs:
           node -e 'const j=process.env.GOOGLE_SERVICES_JSON||""; JSON.parse(j); require("fs").writeFileSync("app/google-services.json", j); ' \
             || { echo "::error::GOOGLE_SERVICES_JSON manquant ou JSON invalide"; exit 1; }
 
+      # android/ n'est PAS committé dans le repo mobile (gitignored) : c'est
+      # normalement `eas build --local` qui le génère par prebuild — mais trop tard
+      # pour qu'on puisse patcher gradle.properties avant. On force donc un prebuild
+      # explicite ici. Comme le dossier natif existe ensuite, `eas build --local` le
+      # réutilise tel quel (pas de second prebuild qui écraserait nos overrides).
+      # google-services.json local (écrit à l'étape précédente) est repris par
+      # app.config.js — le prebuild ne crashe pas sur Firebase.
+      - name: Prebuild Android
+        run: cd app && npx expo prebuild --platform android --no-install
+
       # Overrides Gradle CI-only (checkout jetable → aucun impact sur le dev local).
       # Un properties file applique le DERNIER doublon de clé, donc appendre suffit à
-      # écraser les valeurs committées.
+      # écraser les valeurs du fichier généré par prebuild.
       #  - reactNativeArchitectures : 4 → 2 ABI. x86/x86_64 ne servent qu'aux
       #    émulateurs/Chromebooks Intel ; les téléphones réels sont tous ARM. Coupe
       #    ~la moitié de la compilation native C++ (newArch + Hermes, par ABI).
