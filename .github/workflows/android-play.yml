@@ -45,14 +45,21 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      # Clé qui évolue à chaque run : actions/cache ne réécrit JAMAIS un cache dont
+      # la clé existe déjà. Avec une clé figée sur le lockfile, on restaurait
+      # éternellement le cache du 1er build (froid). Ici chaque run sauvegarde un
+      # cache frais (outputs du build cache Gradle inclus) et restaure le plus
+      # récent via restore-keys.
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('app/package-lock.json') }}
-          restore-keys: gradle-${{ runner.os }}-
+          key: gradle-${{ runner.os }}-${{ hashFiles('app/package-lock.json') }}-${{ github.run_id }}
+          restore-keys: |
+            gradle-${{ runner.os }}-${{ hashFiles('app/package-lock.json') }}-
+            gradle-${{ runner.os }}-
 
       - name: Setup EAS CLI
         uses: expo/expo-github-action@v8
@@ -106,6 +113,23 @@ jobs:
         run: |
           node -e 'const j=process.env.GOOGLE_SERVICES_JSON||""; JSON.parse(j); require("fs").writeFileSync("app/google-services.json", j); ' \
             || { echo "::error::GOOGLE_SERVICES_JSON manquant ou JSON invalide"; exit 1; }
+
+      # Overrides Gradle CI-only (checkout jetable → aucun impact sur le dev local).
+      # Un properties file applique le DERNIER doublon de clé, donc appendre suffit à
+      # écraser les valeurs committées.
+      #  - reactNativeArchitectures : 4 → 2 ABI. x86/x86_64 ne servent qu'aux
+      #    émulateurs/Chromebooks Intel ; les téléphones réels sont tous ARM. Coupe
+      #    ~la moitié de la compilation native C++ (newArch + Hermes, par ABI).
+      #  - org.gradle.caching : active le build cache Gradle (réutilise les outputs
+      #    de tâches d'un run à l'autre, persistés via ~/.gradle/caches).
+      - name: Trim ABIs and enable Gradle build cache (CI only)
+        run: |
+          {
+            echo ""
+            echo "# --- CI overrides (28sig-action) ---"
+            echo "reactNativeArchitectures=arm64-v8a,armeabi-v7a"
+            echo "org.gradle.caching=true"
+          } >> app/android/gradle.properties
 
       - name: Build .aab
         env:

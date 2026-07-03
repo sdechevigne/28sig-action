@@ -55,8 +55,10 @@ jobs:
           path: |
             ~/.cocoapods
             ~/Library/Caches/CocoaPods
-          key: pods-${{ runner.os }}-${{ hashFiles('app/package-lock.json') }}
-          restore-keys: pods-${{ runner.os }}-
+          key: pods-${{ runner.os }}-${{ hashFiles('app/package-lock.json') }}-${{ github.run_id }}
+          restore-keys: |
+            pods-${{ runner.os }}-${{ hashFiles('app/package-lock.json') }}-
+            pods-${{ runner.os }}-
 
       - name: Setup EAS CLI
         uses: expo/expo-github-action@v8
