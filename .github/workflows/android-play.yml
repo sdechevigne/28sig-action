@@ -42,8 +42,19 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      # `packages` est passé EXPLICITEMENT : le défaut de l'action est
+      # "tools platform-tools", or Google a retiré le paquet legacy `tools` du
+      # dépôt SDK (mi-2026, remplacé par cmdline-tools). Sans override, le step
+      # meurt sur « Warning: Failed to find package 'tools' » + exit 1.
+      # On n'épingle PAS platforms/build-tools ici : les versions viennent du
+      # build.gradle généré par `expo prebuild` (donc d'Expo, pas de nous), et
+      # Gradle les télécharge au build — les licences SDK ayant déjà été
+      # acceptées par cette action. Les figer ici les désynchroniserait d'Expo
+      # à chaque montée de version.
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       # Clé qui évolue à chaque run : actions/cache ne réécrit JAMAIS un cache dont
       # la clé existe déjà. Avec une clé figée sur le lockfile, on restaurait
