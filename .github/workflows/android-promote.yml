@@ -1,0 +1,111 @@
+name: Android Promote
+
+# Promeut un build déjà présent sur Play (piste internal, déposé par android-play.yml)
+# vers une autre piste (production par défaut), via l'API Google Play Developer.
+# dry_run=true (défaut) : affiche seulement l'état des pistes, ne modifie rien.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_code:
+        description: "versionCode à promouvoir (vide = le plus récent de la piste source)"
+        required: false
+        default: ""
+      from_track:
+        description: "Piste source"
+        required: false
+        default: "internal"
+      to_track:
+        description: "Piste cible"
+        required: false
+        default: "production"
+      rollout:
+        description: "Fraction du déploiement (1 = 100 %)"
+        required: false
+        default: "1"
+      release_notes_fr:
+        description: "Notes de version fr-FR"
+        required: false
+        default: ""
+      release_notes_en:
+        description: "Notes de version en-US"
+        required: false
+        default: ""
+      dry_run:
+        description: "Lecture seule (n'applique rien)"
+        type: boolean
+        required: false
+        default: true
+
+concurrency:
+  group: android-promote
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Promote
+        env:
+          SA_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          PACKAGE: com.sig28
+          VERSION_CODE: ${{ inputs.version_code }}
+          FROM_TRACK: ${{ inputs.from_track }}
+          TO_TRACK: ${{ inputs.to_track }}
+          ROLLOUT: ${{ inputs.rollout }}
+          NOTES_FR: ${{ inputs.release_notes_fr }}
+          NOTES_EN: ${{ inputs.release_notes_en }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          cat > promote.mjs <<'EOF'
+          import crypto from 'node:crypto'
+          const env = process.env
+          const sa = JSON.parse(env.SA_JSON || '{}')
+          if (!sa.client_email) { console.error('::error::GOOGLE_PLAY_SERVICE_ACCOUNT_JSON manquant'); process.exit(1) }
+          const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url')
+          const now = Math.floor(Date.now() / 1000)
+          const unsigned = `${b64({ alg: 'RS256', typ: 'JWT' })}.${b64({ iss: sa.client_email, scope: 'https://www.googleapis.com/auth/androidpublisher', aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 })}`
+          const sig = crypto.sign('sha256', Buffer.from(unsigned), sa.private_key).toString('base64url')
+          const tr = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${unsigned}.${sig}` })
+          const { access_token } = await tr.json()
+          if (!access_token) { console.error('::error::échec OAuth Google'); process.exit(1) }
+          const base = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${env.PACKAGE}`
+          const api = async (method, path, body) => {
+            const r = await fetch(base + path, { method, headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
+            const t = await r.text()
+            if (!r.ok) { console.error(`::error::${method} ${path} -> ${r.status} ${t}`); process.exit(1) }
+            return t ? JSON.parse(t) : {}
+          }
+          const edit = await api('POST', '/edits', {})
+          const tracks = await api('GET', `/edits/${edit.id}/tracks`)
+          for (const t of tracks.tracks ?? []) {
+            for (const rel of t.releases ?? []) console.log(`[${t.track}] ${rel.name ?? ''} status=${rel.status} codes=${(rel.versionCodes ?? []).join(',')} fraction=${rel.userFraction ?? ''}`)
+          }
+          const src = (tracks.tracks ?? []).find((t) => t.track === env.FROM_TRACK)
+          const codes = (src?.releases ?? []).flatMap((r) => r.versionCodes ?? []).map(Number)
+          const code = env.VERSION_CODE ? Number(env.VERSION_CODE) : Math.max(...codes)
+          if (!codes.includes(code)) { console.error(`::error::versionCode ${code} absent de la piste ${env.FROM_TRACK}`); process.exit(1) }
+          const srcRel = src.releases.find((r) => (r.versionCodes ?? []).map(Number).includes(code))
+          const notes = [['fr-FR', env.NOTES_FR], ['en-US', env.NOTES_EN]].filter(([, x]) => x).map(([language, text]) => ({ language, text }))
+          const fraction = Number(env.ROLLOUT || '1')
+          const release = {
+            name: srcRel.name,
+            versionCodes: [String(code)],
+            status: fraction < 1 ? 'inProgress' : 'completed',
+            ...(fraction < 1 ? { userFraction: fraction } : {}),
+            releaseNotes: notes.length ? notes : srcRel.releaseNotes,
+          }
+          console.log(`Promotion prévue : ${code} (${srcRel.name}) ${env.FROM_TRACK} -> ${env.TO_TRACK}, ${JSON.stringify(release)}`)
+          if (env.DRY_RUN === 'true') { await api('DELETE', `/edits/${edit.id}`); console.log('dry_run : rien appliqué'); process.exit(0) }
+          await api('PUT', `/edits/${edit.id}/tracks/${env.TO_TRACK}`, { track: env.TO_TRACK, releases: [release] })
+          const res = await api('POST', `/edits/${edit.id}:commit`)
+          console.log(`Commit OK, edit ${res.id}`)
+          EOF
+          node promote.mjs
